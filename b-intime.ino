@@ -16,6 +16,19 @@ Redgick_MatrixMAX72XX matrix;
 #define ONBOARDLED 2 // Built in LED
 #define WIDTH 32
 
+// HTTP ERRORS CODE
+#define HTTPCODE_CONNECTION_REFUSED  (-1)
+#define HTTPCODE_SEND_HEADER_FAILED  (-2)
+#define HTTPCODE_SEND_PAYLOAD_FAILED (-3)
+#define HTTPCODE_NOT_CONNECTED       (-4)
+#define HTTPCODE_CONNECTION_LOST     (-5)
+#define HTTPCODE_NO_STREAM           (-6)
+#define HTTPCODE_NO_HTTP_SERVER      (-7)
+#define HTTPCODE_TOO_LESS_RAM        (-8)
+#define HTTPCODE_ENCODING            (-9)
+#define HTTPCODE_STREAM_WRITE        (-10)
+#define HTTPCODE_TIMEOUT             (-11)
+
 // globals
 Screen screen(WIDTH, 16, MONOCHROME); // with, height, colors);
 asyncHTTPrequest request;
@@ -28,6 +41,7 @@ NTPEvent_t ntpEvent; // Last triggered event
 
 static boolean sync_ok = false;
 static char progress = 0;
+static int error_code = 0;
 static int ratp[3] = {};
 static size_t ratp_size = 0;
 
@@ -87,6 +101,13 @@ void request_callback(void* optParm, asyncHTTPrequest* request, int readyState){
         String res = request->responseText();
         //Serial.println(res);
 
+        int status_code = request->responseHTTPcode();
+        if(status_code != 200) {
+          error_code = status_code;
+          ratp_size = 0;
+          return;
+        }
+
         DeserializationError error = deserializeJson(doc, res);
 
         if (error) {
@@ -95,7 +116,7 @@ void request_callback(void* optParm, asyncHTTPrequest* request, int readyState){
           return;
         }
 
-        int list_len = 0;
+        size_t list_len = 0;
         int wait_list[6] = {};
 
         JsonObject root_0 = doc["nextStopsOnLines"][0];
@@ -125,7 +146,7 @@ void request_callback(void* optParm, asyncHTTPrequest* request, int readyState){
         //}
         //Serial.println();
 
-        ratp_size = min(3, list_len);
+        ratp_size = min((unsigned int)3, list_len);
         for (int idx = 0; idx < ratp_size; idx++) {
           ratp[idx] = wait_list[list_len - 1 - idx];
         }        
@@ -145,7 +166,7 @@ void setup() {
 
   // screen message
   screen.print(1, 1, "B in");
-  screen.print(5, 8, "time");
+  screen.print(7, 8, "time");
   matrix.display(screen.getBuffer());
 
   NTP.onNTPSyncEvent ([] (NTPEvent_t event) {
@@ -209,26 +230,46 @@ void loop() {
       print_8x8(&screen, 0, 0, strBuffer);
       //screen.print(1, 1, strBuffer);
 
-      switch (ratp_size) {
-        case 3:
-          screen.print(22, 8, String(ratp[2]));
-        case 2:
-          screen.print(11, 8, String(ratp[1]));
-        case 1:
-          screen.print(1, 8, String(ratp[0]));
-        default:
+      if(error_code != 0 && ratp_size == 0) {
+        screen.print(1, 8, "?");
+        screen.print(4, 8, "!");
+        screen.print(7, 8, "?");
+        switch (error_code) {
+          case HTTPCODE_TIMEOUT:
+            screen.print(13, 8, "time");
             break;
+          case HTTPCODE_TOO_LESS_RAM:
+            screen.print(13, 8, "ram");
+            break;
+          case HTTPCODE_NOT_CONNECTED:
+            screen.print(13, 8, "lost");
+            break;
+          default:
+            screen.print(16, 8, String(error_code));
+            break;
+        }
+        
+      } else {
+        switch (ratp_size) {
+          case 3:
+            screen.print(22, 8, String(ratp[2]));
+          case 2:
+            screen.print(11, 8, String(ratp[1]));
+          case 1:
+            screen.print(1, 8, String(ratp[0]));
+          default:
+              break;
+        }
       }
 
-      screen.setPixel(progress, 15, 1);
-      screen.setPixel(progress+1, 15, 1);
-      screen.setPixel(progress+2, 15, 1);
-      if(progress == 28) {
+      screen.setPixel(1+progress, 15, 1);
+      screen.setPixel(1+(progress+1) % 30, 15, 1);
+      screen.setPixel(1+(progress+2) % 30, 15, 1);
+      if(progress >= 27) {
         screen.setPixel(0, 15, 1);
       }
-      if (progress == 29) {
-        screen.setPixel(0, 15, 1);
-        screen.setPixel(1, 15, 1);
+      if (progress >= 28 || progress == 0) {
+        screen.setPixel(31, 15, 1);
       }
     } else {
       // /!\ no screen clear
@@ -243,7 +284,7 @@ void loop() {
     }
 
     if(progress >= 30) {
-      progress = 1;
+      progress = 0;
       debug_status();
       get_ratp();
     }
