@@ -17,6 +17,7 @@ Redgick_MatrixMAX72XX matrix;
 #define WIDTH 32
 
 // HTTP ERRORS CODE
+// from asyncHTTPrequest.h
 #define HTTPCODE_CONNECTION_REFUSED  (-1)
 #define HTTPCODE_SEND_HEADER_FAILED  (-2)
 #define HTTPCODE_SEND_PAYLOAD_FAILED (-3)
@@ -28,6 +29,16 @@ Redgick_MatrixMAX72XX matrix;
 #define HTTPCODE_ENCODING            (-9)
 #define HTTPCODE_STREAM_WRITE        (-10)
 #define HTTPCODE_TIMEOUT             (-11)
+
+// from https://github.com/espressif/esp-lwip/blob/2.1.2-esp/src/include/lwip/err.h
+#define TCP_ERR_IF                   (-12) // Low-level netif error
+#define TCP_ERR_ABRT                 (-13) // Connection aborted
+#define TCP_ERR_RST                  (-14) // Connection reset
+#define TCP_ERR_CLSD                 (-15) // Connection closed
+#define TCP_ERR_ARG                  (-16) // Illegal argument
+
+// custom
+#define JSON_DESERIALIZE             (-30)
 
 // globals
 Screen screen(WIDTH, 16, MONOCHROME); // with, height, colors);
@@ -91,7 +102,8 @@ void processSyncEvent (NTPEvent_t ntpEvent) {
 
 void get_ratp() {
   if(request.readyState() == 0 || request.readyState() == 4){
-    request.open("GET", "http://apixha.ixxi.net/APIX?keyapp=FvChCBnSetVgTKk324rO&cmd=getNextStopsRealtime&stopArea=383&line=20&&direction=40&apixFormat=json");
+    request.open("GET", "http://37.187.86.136/APIX?keyapp=PfndhPqWEoI5ERvmlGiw9S3m&cmd=getNextStopsRealtime&stopArea=383&line=20&&direction=40&apixFormat=json");  
+    //request.open("GET", "http://87.98.136.166/APIX?keyapp=PfndhPqWEoI5ERvmlGiw9S3m&cmd=getNextStopsRealtime&stopArea=383&line=20&&direction=40&apixFormat=json");
     request.send();
   }
 }
@@ -107,17 +119,17 @@ void request_callback(void* optParm, asyncHTTPrequest* request, int readyState){
           ratp_size = 0;
           return;
         }
+        error_code = 0;
 
         DeserializationError error = deserializeJson(doc, res);
 
         if (error) {
           Serial.print(F("deserializeJson() failed: "));
           Serial.println(error.f_str());
+          error_code = JSON_DESERIALIZE;
+          ratp_size = 0;
           return;
         }
-
-        size_t list_len = 0;
-        int wait_list[6] = {};
 
         JsonObject root_0 = doc["nextStopsOnLines"][0];
         //for (JsonObject root_0_nextStop : root_0["nextStops"].as<JsonArray>()) {
@@ -128,6 +140,16 @@ void request_callback(void* optParm, asyncHTTPrequest* request, int readyState){
         //}
 
         JsonArray root_0_nextStops = root_0["nextStops"].as<JsonArray>();
+
+        if(root_0_nextStops.size() == 0) {
+          ratp_size = 0;
+          Serial.println("Empty result from api");
+          return;
+        }
+        
+        size_t list_len = 0;
+        int wait_list[6] = {};
+        
         for (int idx = root_0_nextStops.size(); idx > 0; idx--) {
           JsonObject root_0_nextStop = root_0_nextStops[idx-1];
         
@@ -149,7 +171,7 @@ void request_callback(void* optParm, asyncHTTPrequest* request, int readyState){
         ratp_size = min((unsigned int)3, list_len);
         for (int idx = 0; idx < ratp_size; idx++) {
           ratp[idx] = wait_list[list_len - 1 - idx];
-        }        
+        }
     }
 }
 
@@ -244,6 +266,12 @@ void loop() {
           case HTTPCODE_NOT_CONNECTED:
             screen.print(13, 8, "lost");
             break;
+          case TCP_ERR_RST:
+            screen.print(13, 8, "rst");
+            break;
+          case JSON_DESERIALIZE:
+            screen.print(13, 8, "json");
+            break;
           default:
             screen.print(16, 8, String(error_code));
             break;
@@ -271,6 +299,12 @@ void loop() {
       if (progress >= 28 || progress == 0) {
         screen.setPixel(31, 15, 1);
       }
+
+      if(error_code == 0 && ratp_size == 0 && progress < 30 && progress % 10 == 0 && local_tm->tm_hour > 5) {
+        Serial.println("need data");
+        get_ratp();
+      }
+      
     } else {
       // /!\ no screen clear
       screen.setPixel((WIDTH >> 1) + progress, 15, 1);
