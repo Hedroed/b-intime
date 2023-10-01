@@ -10,11 +10,19 @@ Redgick_MatrixMAX72XX matrix;
 #include <ESP8266WiFi.h>
 #include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
 #include <asyncHTTPrequest.h>  // https://github.com/boblemaire/asyncHTTPrequest + https://github.com/me-no-dev/ESPAsyncTCP
+//TODO: https://github.com/khoih-prog/AsyncHTTPSRequest_Generic
 #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson
 
 #define UPDATE_INTERVAL 1000
 #define ONBOARDLED 2 // Built in LED
 #define WIDTH 32
+
+// HTTP STATES
+#define readyStateUnsent    0          // Client created, open not yet called
+#define readyStateOpened    1          // open() has been called, connected
+#define readyStateHdrsRecvd 2          // send() called, response headers available
+#define readyStateLoading   3          // receiving, partial data available
+#define readyStateDone      4
 
 // HTTP ERRORS CODE
 // from asyncHTTPrequest.h
@@ -40,9 +48,17 @@ Redgick_MatrixMAX72XX matrix;
 // custom
 #define JSON_DESERIALIZE             (-30)
 
+// Netatmo
+#define NETATMO_URL_DATA ("https://api.netatmo.com/api/getstationsdata?device_id=70%3Aee%3A50%3Aa5%3Aa7%3A90")
+#define NETATMO_URL_REFRESH ("https://api.netatmo.com/oauth2/token")
+#define NETATMO_CLIENT_ID ("65104ee4a0a5bdf512011839")
+#define NETATMO_CLIENT_SECRET ("mlEuc1aV8CTEdFQ3BBiKdFe5NO")
+
+static String na_access = "650ef776f150698ace0f1331|5ff8e17a632c86a334a0407b71a5eaae";
+static String na_refresh = "650ef776f150698ace0f1331|bef4a5ac6af453d7f0852ed1b694f4cb";
+
 // globals
 Screen screen(WIDTH, 16, MONOCHROME); // with, height, colors);
-asyncHTTPrequest request;
 DynamicJsonDocument doc(4096);
 
 const PROGMEM char* ntpServer = "fr.pool.ntp.org";
@@ -55,6 +71,9 @@ static char progress = 0;
 static int error_code = 0;
 static int ratp[3] = {};
 static size_t ratp_size = 0;
+
+int temperature = 0;
+
 
 Bitmap wifi_icon = Bitmap(7,7,"0x7d04e00100");
 
@@ -100,35 +119,35 @@ void processSyncEvent (NTPEvent_t ntpEvent) {
     }
 }
 
+asyncHTTPrequest ratpRequest;
+
 void get_ratp() {
-  if(request.readyState() == 0 || request.readyState() == 4){
-    request.open("GET", "http://37.187.86.136/APIX?keyapp=PfndhPqWEoI5ERvmlGiw9S3m&cmd=getNextStopsRealtime&stopArea=383&line=20&&direction=40&apixFormat=json");  
-    //request.open("GET", "http://87.98.136.166/APIX?keyapp=PfndhPqWEoI5ERvmlGiw9S3m&cmd=getNextStopsRealtime&stopArea=383&line=20&&direction=40&apixFormat=json");
-    request.send();
-  }
+    if(ratpRequest.readyState() == readyStateUnsent || ratpRequest.readyState() == readyStateDone){
+        ratpRequest.open("GET", "http://37.187.86.136/APIX?keyapp=PfndhPqWEoI5ERvmlGiw9S3m&cmd=getNextStopsRealtime&stopArea=383&line=20&&direction=40&apixFormat=json");  
+        //ratpRequest.open("GET", "http://87.98.136.166/APIX?keyapp=PfndhPqWEoI5ERvmlGiw9S3m&cmd=getNextStopsRealtime&stopArea=383&line=20&&direction=40&apixFormat=json");
+        ratpRequest.send();
+    }
 }
 
-void request_callback(void* optParm, asyncHTTPrequest* request, int readyState){
-    if(readyState == 4){
+void ratp_callback(void* optParm, asyncHTTPrequest* request, int readyState){
+    if(readyState == readyStateDone){
         String res = request->responseText();
-        //Serial.println(res);
-
         int status_code = request->responseHTTPcode();
         if(status_code != 200) {
-          error_code = status_code;
-          ratp_size = 0;
-          return;
+            error_code = status_code;
+            ratp_size = 0;
+            return;
         }
         error_code = 0;
 
         DeserializationError error = deserializeJson(doc, res);
 
         if (error) {
-          Serial.print(F("deserializeJson() failed: "));
-          Serial.println(error.f_str());
-          error_code = JSON_DESERIALIZE;
-          ratp_size = 0;
-          return;
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.f_str());
+            error_code = JSON_DESERIALIZE;
+            ratp_size = 0;
+            return;
         }
 
         JsonObject root_0 = doc["nextStopsOnLines"][0];
@@ -142,24 +161,24 @@ void request_callback(void* optParm, asyncHTTPrequest* request, int readyState){
         JsonArray root_0_nextStops = root_0["nextStops"].as<JsonArray>();
 
         if(root_0_nextStops.size() == 0) {
-          ratp_size = 0;
-          Serial.println("Empty result from api");
-          return;
+            ratp_size = 0;
+            Serial.println("Empty result from api");
+            return;
         }
         
         size_t list_len = 0;
         int wait_list[6] = {};
         
         for (int idx = root_0_nextStops.size(); idx > 0; idx--) {
-          JsonObject root_0_nextStop = root_0_nextStops[idx-1];
+            JsonObject root_0_nextStop = root_0_nextStops[idx-1];
         
-          int waitingTime = root_0_nextStop["waitingTime"]; // 0, 360, 780, 900, 1260, 1680
-          //const char* nextStopTime_string = root_0_nextStop["nextStopTime"];
+            int waitingTime = root_0_nextStop["waitingTime"]; // 0, 360, 780, 900, 1260, 1680
+            //const char* nextStopTime_string = root_0_nextStop["nextStopTime"];
 
-          if(list_len < 3 || waitingTime >= 240) {
+            if(list_len < 3 || waitingTime >= 240) {
             wait_list[list_len] = waitingTime / 60;
             list_len++;
-          }
+            }
         }
         //Serial.print("result ");
         //for (int idx = 0; idx < list_len; idx++) {
@@ -170,8 +189,65 @@ void request_callback(void* optParm, asyncHTTPrequest* request, int readyState){
 
         ratp_size = min((unsigned int)3, list_len);
         for (int idx = 0; idx < ratp_size; idx++) {
-          ratp[idx] = wait_list[list_len - 1 - idx];
+            ratp[idx] = wait_list[list_len - 1 - idx];
         }
+    }
+}
+
+
+asyncHTTPrequest netatmoTokenRequest;
+
+void get_netatmo_token() {
+    if(netatmoTokenRequest.readyState() == readyStateUnsent || netatmoTokenRequest.readyState() == readyStateDone){
+        netatmoTokenRequest.open("GET", NETATMO_URL_REFRESH);
+        netatmoTokenRequest.send();
+    }
+}
+
+void netatmo_refresh_callback(void* optParm, asyncHTTPrequest* request, int readyState){
+    if(readyState == readyStateDone){
+        Serial.println("netatmo_refresh_callback");
+    }
+}
+
+asyncHTTPrequest netatmoDataRequest;
+
+const String BEARER = "Bearer ";
+void get_netatmo_data() {
+    if(netatmoDataRequest.readyState() == readyStateUnsent || netatmoDataRequest.readyState() == readyStateDone){
+        netatmoDataRequest.open("GET", NETATMO_URL_DATA);
+        netatmoDataRequest.setReqHeader(F("Content-Type"), F("application/json"));
+        netatmoDataRequest.setReqHeader(F("Authorization"), (BEARER + na_access).c_str());
+        netatmoDataRequest.send();
+        
+    }
+}
+
+void netatmo_data_callback(void* optParm, asyncHTTPrequest* request, int readyState){
+    if(readyState == readyStateDone){
+        String res = request->responseText();
+        Serial.println(res);
+        int status_code = request->responseHTTPcode();
+        if(status_code != 200) {
+            error_code = status_code;
+            return;
+        }
+        error_code = 0;
+
+        DeserializationError error = deserializeJson(doc, res);
+
+        if (error) {
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.f_str());
+            error_code = JSON_DESERIALIZE;
+            return;
+        }
+
+        JsonObject root_0 = doc["body"]["devices"][0]["dashboard_data"];
+        temperature = root_0["Temperature"];
+        int co2 = root_0["CO2"];
+        int humidity = root_0["Humidity"];
+        int noise = root_0["Noise"];
     }
 }
 
@@ -212,10 +288,13 @@ void setup() {
   NTP.begin (ntpServer);
 
   //request.setDebug(true);
-  request.onReadyStateChange(request_callback);
+  //ratpRequest.onReadyStateChange(ratp_callback);
+  //netatmoTokenRequest.onReadyStateChange(netatmo_refresh_callback);
+  netatmoDataRequest.onReadyStateChange(netatmo_data_callback);
 
-  get_ratp();
-  
+  //get_ratp();
+  //get_netatmo_data();
+
   //screen.print(27, 0, "c");
   screen.drawBitmap(24, 1, wifi_icon, 1);
   matrix.display(screen.getBuffer());
@@ -288,6 +367,7 @@ void loop() {
           default:
               break;
         }
+        //screen.print(1, 8, String(temperature));
       }
 
       screen.setPixel(1+progress, 15, 1);
@@ -300,11 +380,6 @@ void loop() {
         screen.setPixel(31, 15, 1);
       }
 
-      if(error_code == 0 && ratp_size == 0 && progress < 30 && progress % 10 == 0 && local_tm->tm_hour > 5) {
-        Serial.println("need data");
-        get_ratp();
-      }
-      
     } else {
       // /!\ no screen clear
       screen.setPixel((WIDTH >> 1) + progress, 15, 1);
@@ -320,7 +395,8 @@ void loop() {
     if(progress >= 30) {
       progress = 0;
       debug_status();
-      get_ratp();
+      //get_ratp();
+      //get_netatmo_data();
     }
 
     matrix.display(screen.getBuffer());
